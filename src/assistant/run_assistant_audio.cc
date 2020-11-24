@@ -217,23 +217,48 @@ int main(int argc, char** argv) {
     context.set_fail_fast(false);
     context.set_credentials(call_credentials);
 
-    std::shared_ptr<ClientReaderWriter<AssistRequest, AssistResponse>> stream(
-        std::move(assistant->Assist(&context)));
+    grpc::CompletionQueue stream_cq;
+    std::shared_ptr<grpc::ClientAsyncReaderWriter<AssistRequest, AssistResponse>> stream(
+        std::move(assistant->AsyncAssist(&context, &stream_cq, (void*)1)));
+
+    bool ok;
+    void* tag;
+    stream_cq.Next(&tag, &ok);
+    if (tag != (void*)1 || !ok) {
+      continue;
+    }
+
     // Write config in first stream.
     if (verbose) {
       std::clog << "assistant_sdk wrote first request: "
                 << request.ShortDebugString() << std::endl;
     }
-    stream->Write(request);
+
+    stream->Write(request, (void*)1);
+    stream_cq.Next(&tag, &ok);
+    if (tag != (void*)1 || !ok) {
+      continue;
+    }
 
     audio_input.reset(new AudioInputALSA());
 
+    volatile bool write_pending = false;
+
     audio_input->AddDataListener(
-        [stream, &request](std::shared_ptr<std::vector<unsigned char>> data) {
+      [stream, &request, &write_pending](std::shared_ptr<std::vector<unsigned char>> data) {
+        if (!write_pending) {
           request.set_audio_in(&((*data)[0]), data->size());
-          stream->Write(request);
-        });
-    audio_input->AddStopListener([stream]() { stream->WritesDone(); });
+          stream->Write(request, (void*)1);
+          write_pending = true;
+        }
+      });
+    audio_input->AddStopListener(
+      [stream, &write_pending]() {
+        if (!write_pending) {
+          stream->WritesDone((void*)1);
+          write_pending = true;
+        }
+      });
     audio_input->Start();
 
     AudioOutputALSA audio_output;
@@ -244,7 +269,26 @@ int main(int argc, char** argv) {
       std::clog << "assistant_sdk waiting for response ... " << std::endl;
     }
     AssistResponse response;
-    while (stream->Read(&response)) {  // Returns false when no more to read.
+    volatile bool read_pending = false;
+    while (true) {
+      if (!read_pending) {
+        stream->Read(&response, (void*)2);
+        read_pending = true;
+      }
+      stream_cq.Next(&tag, &ok);
+      if (!ok) {
+          write_pending = false;
+          if (audio_input != nullptr && audio_input->IsRunning()) {
+            audio_input->Stop();
+          }
+          break;
+      }
+      if (tag == (void*)1) {
+        write_pending = false;
+        continue;
+      } else if (tag == (void*)2) {
+        read_pending = false;
+      }
       if (response.has_audio_out() ||
           response.event_type() == AssistResponse_EventType_END_OF_UTTERANCE) {
         // Synchronously stops audio input if there is one.
@@ -291,7 +335,9 @@ int main(int argc, char** argv) {
 
     audio_output.Stop();
 
-    grpc::Status status = stream->Finish();
+    grpc::Status status;
+    stream->Finish(&status, (void*)3);
+    stream_cq.Next(&tag, &ok);
     if (!status.ok()) {
       // Report the RPC failure.
       std::cerr << "assistant_sdk failed, error: " << status.error_message()
