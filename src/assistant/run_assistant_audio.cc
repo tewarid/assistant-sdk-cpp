@@ -155,6 +155,10 @@ int main(int argc, char** argv) {
     return -1;
   }
 
+  auto channel = CreateChannel(api_endpoint);
+  std::unique_ptr<EmbeddedAssistant::Stub> assistant(
+      EmbeddedAssistant::NewStub(channel));
+
   while (true) {
     // Create an AssistRequest
     AssistRequest request;
@@ -209,10 +213,6 @@ int main(int argc, char** argv) {
     }
 
     // Begin a stream.
-    auto channel = CreateChannel(api_endpoint);
-    std::unique_ptr<EmbeddedAssistant::Stub> assistant(
-        EmbeddedAssistant::NewStub(channel));
-
     grpc::ClientContext context;
     context.set_fail_fast(false);
     context.set_credentials(call_credentials);
